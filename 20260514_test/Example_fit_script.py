@@ -32,7 +32,7 @@ big_click_params = pandas.read_pickle(
     os.path.join(output_directory, 'big_click_params'))
 
 RV_channel = big_triggered_neural.xs('RV', level='channel')
-
+RV_channel = RV_channel.loc[15:]
 XCsubargs = {
     'seed': 0,
     'pst_range': [0.0005, 0.006],

@@ -259,7 +259,7 @@ axa[0].plot(their_ts, epochs_means_ex[:,10,0] * our_range/their_range, label='ex
 axa[1].plot(our_ts_shifted,epochs_means[:,10,0], label='Lighthouse_232 RV')
 axa[1].plot(their_ts, epochs_means_ex[:,10,0] * our_range/their_range, label='example_1')
 for ax in axa:
-    ax.set_xlabel('time (ms)')
+    ax.set_xlabel('time (s)')
     ax.set_ylabel('ABR normalized')
 axa[0].set_title('Actual times')
 axa[1].set_title('Our ABR shifted +0.55 ms')
