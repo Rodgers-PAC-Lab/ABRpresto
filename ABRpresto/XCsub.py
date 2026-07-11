@@ -371,7 +371,7 @@ Parameters
             raise RuntimeError('N_by_polarity is empty but not all epochs were dropped. If this happened its a bug.')
     else:
         N_min_global = N_by_polarity.min()
-    if N_min_global < 100:
+    if N_min_global < 20: # CR changed
         if dropped_all:
             msg = f'All epochs were dropped because they all had values of all zero.'
         else:
