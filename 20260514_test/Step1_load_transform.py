@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import json
 import pandas
 import numpy as np
+import time
 
 def rodgerslab_to_ABRpresto_format(big_triggered_neural_df, sampling_rate=16000):
     # Converts one of our ABR data dataframes into a format ABRpresto can use.
@@ -68,7 +69,7 @@ def fs_from_timepoints(epochs):
     t_diffs, tdiff_counts = np.unique(np.diff(epochs.keys().values), return_counts=True)
     fs = 1 / t_diffs[tdiff_counts.argmax()]
     return fs
-def N_polarity_check(epochs):
+def N_polarity_check(epochs, N_subaverages=2):
     N_by_polarity = epochs.groupby(['polarity', 'level']).size()
     if len(N_by_polarity) == 0:
         raise RuntimeError('N_by_polarity is empty.')
@@ -89,22 +90,23 @@ def N_polarity_check(epochs):
     else:
         N_per_group = int(np.floor(N_min_global / N_subaverages))
     return epoch_status, N_per_group
-def time_window_calc(epochs, pst_range=None):
-    # Calculate time window to compute correlation over
-    if pst_range is None:
-        N_time = len(epochs.keys())
-        time_inds = np.full(N_time, True)
-    else:
-        time_inds = (epochs.keys().values >= pst_range[0]) & (
-                epochs.keys().values < pst_range[1])
-        N_time = time_inds.sum()
-    return N_time, time_inds
-
+# def time_window_calc(epochs, pst_range=None):
+#     # Calculate time window to compute correlation over
+#     if pst_range is None:
+#         N_time = len(epochs.keys())
+#         time_inds = np.full(N_time, True)
+#     else:
+#         time_inds = (epochs.keys().values >= pst_range[0]) & (
+#                 epochs.keys().values < pst_range[1])
+#         N_time = time_inds.sum()
+#     return N_time, time_inds
+#
 
 
 ## ABRpresto parameters
 peak_lag_threshold = 0.5    # Still don't really know what this means tbh
-
+second_filter = 'pre-average'
+N_subaverages = 2
 
 ## Paths
 # Load the required file filepaths.json (see README)
@@ -146,10 +148,113 @@ formatted_ABR, formatted_ABR_status = epochs_drop_unused_idxs_trials(formatted_A
 example_fs = fs_from_timepoints(example_ABR)
 ABR_fs = fs_from_timepoints(formatted_ABR)
 
+example_N_time, example_time_inds = N_polarity_check(example_ABR, 2)
+
+# Set variables that will be function arguments in the future
+epochs = example_ABR
+fs = example_fs
+second_filter_settings={'highpass': 300, 'lowpass': 3000, 'order': 1}
+
 # filter data if requested
 if second_filter == 'pre-average':
-    epochs[:] = utils.filter(epochs.values, fs, **second_filter_settings)
+    epochs[:] = ABRpresto.utils.filter(epochs.values, fs, **second_filter_settings)
+
+# Count number of levels, polarities, trials per rep. Calculate fs (sampling frequency) for data)
+levels = epochs.index.get_level_values('level').unique().values
+polarities = epochs.index.get_level_values('polarity').unique().values
 
 peak_lag_threshold_samples = np.ceil(peak_lag_threshold * fs / 1000)
+
+for i, level in enumerate(levels):
+    t0 = time.time()
+    # initialize variables for this level
+    N_by_polarity = epochs.groupby(['polarity', 'level']).size()
+    N_min = N_by_polarity.loc[:, level].min()
+    N_per_group = int(np.floor(N_min / N_subaverages))
+
+    # epochs_i = epochs.loc[:, :, level, :]
+    # indP = epochs.loc[:, 1, level, :].index.get_level_values(0).values
+    # indN = epochs.loc[:, -1, level, :].index.get_level_values(0).values
+    epochsP = epochs.loc[(1, level), time_inds]
+    epochsN = epochs.loc[(-1, level), time_inds]
+    indP = np.arange(len(epochsP))
+    indN = np.arange(len(epochsN))
+    if keep_ind_masks is not None:
+        indP = indP[keep_ind_masks[0]]
+        indN = indN[keep_ind_masks[1]]
+        N_per_group = int(min((len(indP), len(indN))) / N_subaverages)
+    randomized_indicesP = np.zeros((N_per_group * N_subaverages, N_shuffles), dtype=int)
+    randomized_indicesN = np.zeros((N_per_group * N_subaverages, N_shuffles), dtype=int)
+
+    # loop across number of shuffles
+    for ishuf in range(N_shuffles):
+        # randomize into two buckets, evenly splitting by polarity
+        randomized_indicesP[:, ishuf] = rn.choice(indP, N_per_group * N_subaverages, replace=False)
+        randomized_indicesN[:, ishuf] = rn.choice(indN, N_per_group * N_subaverages, replace=False)
+
+        # average (either mean or median)
+        if avmode == 'mean':
+            epochs_mean0 = epochsP.iloc[randomized_indicesP[:N_per_group, ishuf]].mean() + \
+                           epochsN.iloc[randomized_indicesN[:N_per_group, ishuf]].mean()
+            epochs_mean1 = epochsP.iloc[randomized_indicesP[N_per_group:, ishuf]].mean() + \
+                           epochsN.iloc[randomized_indicesN[N_per_group:, ishuf]].mean()
+        elif avmode == 'median':
+            epochs_mean0 = np.median(np.vstack((epochsP.iloc[randomized_indicesP[:N_per_group, ishuf]].values,
+                epochsN.iloc[randomized_indicesN[:N_per_group, ishuf]].values)),
+                axis=0)
+            epochs_mean1 = np.median(np.vstack((epochsP.iloc[randomized_indicesP[N_per_group:, ishuf]].values,
+                epochsN.iloc[randomized_indicesN[N_per_group:, ishuf]].values)),
+                axis=0)
+
+        else:
+            raise RuntimeError(f'Invalid avmode: {avmode}')
+        # filter data if requested
+        if second_filter == 'post-average':
+            epochs_mean0 = utils.filter(epochs_mean0, fs, **second_filter_settings)
+            epochs_mean1 = utils.filter(epochs_mean1, fs, **second_filter_settings)
+        # calculate cross correlation (for 0 lag only if that's all that's needed)
+        if calc_XC0m_only:
+            xc0[i, ishuf] = np.corrcoef(epochs_mean0, epochs_mean1)[0, 1]
+        else:
+            xc[i, ishuf, :] = utils.crossCorr(epochs_mean0, epochs_mean1, norm=True)
+    if not calc_XC0m_only:
+        peak_index[i, :] = np.argmax(xc[i, :, :], axis=-1)
+        peak_lag[i, :] = peak_index[i, :] - (N_time - 1) / 2
+        peak[i, :] = np.max(xc[i, :, :], axis=-1)
+
+    # calculate mean and std of waveform for this level
+    epochs_means[:, i, 0] = epochs.xs(level, level='level').values.mean(axis=0)
+    epochs_sems[:, i] = np.std(epochs.xs(level, level='level').values, axis=0, ddof=1) / \
+                        np.sqrt(len(indP) + len(indN))
+    # find which shuffle yielded a cross-corraltion value closest to the mean
+    if calc_XC0m_only:
+        ishuf_mean = np.argmin(np.abs(xc0[i, :] - xc0[i, :].mean()))
+    else:
+        ishuf_mean = np.argmin(np.abs(xc[i, :, L0] - xc[i, :, L0].mean()))
+    # Create and save subaverages for this shuffle to show on plot later
+    if avmode == 'mean':
+        epochs_means[:, i, 1] = np.mean(
+            np.vstack((epochs.loc[(1, level)].iloc[randomized_indicesP[:N_per_group, ishuf_mean]].values,
+                epochs.loc[(-1, level)].iloc[randomized_indicesN[:N_per_group, ishuf_mean]].values)),
+            axis=0)
+        epochs_means[:, i, 2] = np.mean(
+            np.vstack((epochs.loc[(1, level)].iloc[randomized_indicesP[N_per_group:, ishuf_mean]].values,
+                epochs.loc[(-1, level)].iloc[randomized_indicesN[N_per_group:, ishuf_mean]].values)),
+            axis=0)
+    elif avmode == 'median':
+        epochs_means[:, i, 1] = np.median(
+            np.vstack((epochs.loc[(1, level)].iloc[randomized_indicesP[:N_per_group, ishuf_mean]].values,
+                epochs.loc[(-1, level)].iloc[randomized_indicesN[:N_per_group, ishuf_mean]].values)),
+            axis=0)
+        epochs_means[:, i, 2] = np.median(
+            np.vstack((epochs.loc[(1, level)].iloc[randomized_indicesP[N_per_group:, ishuf_mean]].values,
+                epochs.loc[(-1, level)].iloc[randomized_indicesN[N_per_group:, ishuf_mean]].values)),
+            axis=0)
+    if second_filter == 'post-average':
+        epochs_means[:, i, 0] = utils.filter(epochs_means[:, i, 0], fs, **second_filter_settings)
+        epochs_means[:, i, 1] = utils.filter(epochs_means[:, i, 1], fs, **second_filter_settings)
+        epochs_means[:, i, 2] = utils.filter(epochs_means[:, i, 2], fs, **second_filter_settings)
+    t1 = time.time()
+    comptime[i] = t1 - t0
 
 
